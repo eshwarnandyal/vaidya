@@ -320,6 +320,8 @@
             ]
         };
 
+        // (patientStatus override is applied later once normalizePatientStatusArray is available)
+
         // --- Firebase / Firestore state ---
         let app, auth, db;
         let unsubKpis = null;
@@ -330,11 +332,24 @@
 
         // --- Helper: normalize incoming patient-status arrays (counts -> percentages) ---
         function normalizePatientStatusArray(items) {
-            const sanitized = (Array.isArray(items) ? items.map(it => ({
-                status: String(it.status ?? "Unknown"),
-                value: Number(it.value ?? 0),
-                color: Number(it.color ?? 0x999999)
-            })) : []);
+            // Accept several possible shapes from Firestore / UI: {value}, {count}, {val}
+            const sanitized = (Array.isArray(items) ? items.map(it => {
+                const status = String(it.status ?? it.label ?? it.name ?? "Unknown");
+                // prefer explicit numeric fields but accept alternate keys
+                const rawValue = (it.value ?? it.count ?? it.val ?? it.countValue ?? 0);
+                const value = Number(rawValue || 0);
+                // color may be numeric or a hex string like '#ff0000'
+                let color = it.color ?? it.col ?? it.hexColor ?? 0x999999;
+                if (typeof color === 'string') {
+                    try {
+                        color = color.replace(/^#/, '');
+                        color = Number(parseInt(color, 16));
+                    } catch (e) { color = 0x999999; }
+                } else {
+                    color = Number(color || 0x999999);
+                }
+                return { status, value, color };
+            }) : []);
 
             const total = sanitized.reduce((s, it) => s + Math.max(0, it.value), 0);
 
@@ -355,7 +370,46 @@
                 pctRounded[i] += (diff > 0) ? 1 : -1;
                 diff += (diff > 0) ? -1 : 1;
             }
+            // return values as percentages (sum to ~100) for display and sizing
             return withPct.map((it, i) => ({ status: it.status, value: Math.max(0, pctRounded[i]), color: it.color }));
+        }
+
+        // Check for a locally persisted override (from debug API)
+        function getPatientStatusOverride() {
+            try {
+                const stored = localStorage.getItem('patientStatusOverride');
+                if (!stored) return null;
+                const parsed = JSON.parse(stored);
+                return Array.isArray(parsed) && parsed.length > 0 ? parsed : null;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        // Count patient statuses from a Firestore snapshot and build patientStatus array
+        function buildPatientStatusFromSnapshot(snap) {
+            const statusMap = { 'Active': 0, 'Observation': 0, 'Discharged': 0 };
+            if (snap && !snap.empty) {
+                snap.forEach(doc => {
+                    const data = doc.data();
+                    const status = String(data.status ?? 'Unknown').trim();
+                    if (statusMap.hasOwnProperty(status)) {
+                        statusMap[status]++;
+                    }
+                });
+            }
+            // Build array with actual counts
+            const statusColors = {
+                'Active': 0x10b981,      // green
+                'Observation': 0xfacc15, // yellow
+                'Discharged': 0xef4444   // red
+            };
+            const arr = Object.keys(statusMap).map(status => ({
+                status,
+                value: statusMap[status],
+                color: statusColors[status]
+            }));
+            return arr;
         }
 
         async function initFirebaseAndListeners() {
@@ -412,6 +466,14 @@
 
                 const statusDocRef = doc(db, "dashboard", "patientStatus");
                 unsubStatus = onSnapshot(statusDocRef, async (snap) => {
+                    // If user provided an override locally, prefer that and apply it
+                    const override = getPatientStatusOverride();
+                    if (override) {
+                        console.log('patientStatus override present — applying local override (public listener)');
+                        mockData.patientStatus = normalizePatientStatusArray(override);
+                        applyPatientStatusChanges();
+                        return;
+                    }
                     if (snap && snap.exists()) {
                         const data = snap.data();
                         if (Array.isArray(data.items)) {
@@ -504,6 +566,14 @@
 
                 const statusDocRef = doc(db, "doctors", uid, "dashboard", "patientStatus");
                 unsubStatus = onSnapshot(statusDocRef, async (snap) => {
+                    // If user has a local override, prefer and apply it rather than using doctor-scoped Firestore
+                    const override = getPatientStatusOverride();
+                    if (override) {
+                        console.log('patientStatus override present — applying local override (doctor listener)');
+                        mockData.patientStatus = normalizePatientStatusArray(override);
+                        applyPatientStatusChanges();
+                        return;
+                    }
                     if (snap && snap.exists()) {
                         const data = snap.data();
                         if (Array.isArray(data.items)) {
@@ -554,7 +624,7 @@
                     }
                 }, (err) => { console.warn('patientStatus snapshot error (doctor):', err); applyPatientStatusChanges(); });
 
-                // Patients collection listener to keep engagedPatients in sync
+                // Patients collection listener — derive patientStatus from actual patient records
                 const patientsColRef = collection(db, "doctors", uid, "patients");
                 const patientsQuery = query(patientsColRef, orderBy("createdAt", "desc"), limit(1000));
                 unsubPatients = onSnapshot(patientsQuery, (snap) => {
@@ -562,6 +632,12 @@
                         const count = snap.size;
                         mockData.kpis.engagedPatients = count;
                         applyKPIChanges();
+                        
+                        // Build patientStatus array from actual patient records
+                        const statusArr = buildPatientStatusFromSnapshot(snap);
+                        mockData.patientStatus = normalizePatientStatusArray(statusArr);
+                        console.log('Patient status derived from patients collection:', mockData.patientStatus);
+                        applyPatientStatusChanges();
                     }
                 }, (err) => {
                     console.warn('patients snapshot error:', err);
@@ -648,7 +724,6 @@
             scene.add(blueLight);
 
             doughnutGroup = createPatientStatusDoughnut(mockData.patientStatus);
-            scene.add(doughnutGroup);
 
             raycaster = new THREE.Raycaster();
             mouse = new THREE.Vector2();
@@ -963,6 +1038,7 @@
         }
 
         function applyPatientStatusChanges() {
+            console.log('applyPatientStatusChanges -> patientStatus:', mockData.patientStatus);
             populateLegends();
             createPatientStatusDoughnut(mockData.patientStatus);
         }
@@ -1333,6 +1409,18 @@
             Object.assign(window.__VAIDYA, {
                 getMockData: () => mockData,
                 updateMockData: (d) => { mockData = { ...mockData, ...d }; applyKPIChanges(); applyPatientStatusChanges(); },
+                // Persist patientStatus you add via the debug API so it becomes the source of truth locally
+                setPatientStatus: (arr) => {
+                    try {
+                        if (!Array.isArray(arr)) throw new Error('Expected array');
+                        localStorage.setItem('patientStatusOverride', JSON.stringify(arr));
+                        mockData.patientStatus = normalizePatientStatusArray(arr);
+                        applyPatientStatusChanges();
+                        console.log('Patient status override applied:', mockData.patientStatus);
+                    } catch (e) {
+                        console.error('setPatientStatus failed', e);
+                    }
+                },
                 savePatientToFirestore: savePatientToFirestore,
                 saveRmpToFirestore: saveRmpToFirestore
             });
