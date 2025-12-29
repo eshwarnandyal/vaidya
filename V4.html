@@ -108,9 +108,9 @@
                     <input type="text" id="search-input" placeholder="Search specialists..." 
                         class="w-full pl-10 pr-4 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-medical-500 focus:border-medical-500 transition-all">
                 </div>
-                <button onclick="startVoiceCommand()" id="voice-cmd-btn" class="p-2.5 bg-slate-800 border border-slate-700 rounded-xl text-slate-400 hover:text-medical-500 hover:border-medical-500 transition-all relative" title="Voice Commands (e.g., 'Call Dr. Verma')">
-                    <i data-lucide="mic" class="w-5 h-5"></i>
-                    <span id="voice-listening" class="hidden absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full animate-ping"></span>
+                <button onclick="startVoiceSearch()" id="voice-search-btn" class="p-2.5 bg-slate-800 border border-slate-700 rounded-xl text-slate-400 hover:text-medical-500 hover:border-medical-500 transition-all relative group/mic" title="Voice Search (e.g., 'Dr. Verma')">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-lucide="mic" class="lucide lucide-mic w-5 h-5"><path d="M12 19v3"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><rect x="9" y="2" width="6" height="13" rx="3"></rect></svg>
+                    <span id="voice-search-listening" class="hidden absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full animate-ping"></span>
                 </button>
             </div>
         </div>
@@ -291,6 +291,9 @@
     // Remove the static array — we will populate this from Firestore
     let doctors = [];              // array shown in sidebar
     let doctorsListenerUnsub = null;
+    // Patients for current doctor (populated when authenticated)
+    let patients = [];
+    let patientsListenerUnsub = null;
 
     // Keep previously declared state from your original script
     let currentUser = { name: "Dr. You", spec: "General Surgery", hospital: "Vaidya AI Main Hub", uid: null };
@@ -413,6 +416,33 @@
         console.error("subscribeDoctorsRealtime exception:", e);
         doctors = [];
         renderDoctors('');
+      }
+    }
+
+    // Subscribe to current doctor's patients collection and keep local `patients[]` updated
+    function subscribePatientsRealtime(doctorUid) {
+      if (patientsListenerUnsub) { patientsListenerUnsub(); patientsListenerUnsub = null; }
+      patients = [];
+      if (!doctorUid) return;
+      try {
+        const patientsCol = collection(db, 'doctors', doctorUid, 'patients');
+        const q = query(patientsCol, orderBy('createdAt', 'desc'));
+        patientsListenerUnsub = onSnapshot(q, (snap) => {
+          const arr = [];
+          snap.forEach(docSnap => {
+            const data = docSnap.data() || {};
+            const name = (data.name || data.fullName || data.displayName || '').toString();
+            arr.push({ id: docSnap.id, name: name, raw: data });
+          });
+          patients = arr;
+          console.log('Loaded patients for', doctorUid, 'count:', patients.length);
+        }, (err) => {
+          console.warn('patients onSnapshot error:', err);
+          patients = [];
+        });
+      } catch (e) {
+        console.error('subscribePatientsRealtime error', e);
+        patients = [];
       }
     }
 
@@ -566,6 +596,40 @@
     function triggerFileUpload(){ els.fileInput.click(); }
     els.fileInput.addEventListener('change', (e)=>{ if(e.target.files.length) sendMessageToFirestore(`🗂️ Sent file: ${e.target.files[0].name}`, false, null); });
 
+    window.startVoiceSearch = function() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) { alert("Voice search not supported in your browser."); return; }
+      
+      const recognition = new SpeechRecognition();
+      const indicator = document.getElementById('voice-search-listening');
+      const searchInput = document.getElementById('search-input');
+      
+      recognition.onstart = () => { 
+        indicator.classList.remove('hidden'); 
+      };
+      
+      recognition.onend = () => { 
+        indicator.classList.add('hidden'); 
+      };
+      
+      recognition.onresult = (event) => {
+        const transcript = (event.results && event.results[0] && event.results[0][0] && event.results[0][0].transcript) ? event.results[0][0].transcript : '';
+        const searchTerm = transcript.toLowerCase().trim();
+        
+        if (searchInput) {
+          searchInput.value = searchTerm;
+          renderDoctors(searchTerm);
+        }
+      };
+      
+      recognition.onerror = (event) => {
+        console.error('Voice search error:', event.error);
+        alert('Voice search error: ' + event.error);
+      };
+      
+      recognition.start();
+    };
+
     function startVoiceCommand(){ /* keep your original voice command code if desired */ 
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SpeechRecognition) { alert("Voice commands not supported."); return; }
@@ -574,14 +638,26 @@
       recognition.onstart = () => { indicator.classList.remove('hidden'); };
       recognition.onend = () => { indicator.classList.add('hidden'); };
       recognition.onresult = (event) => {
-        const command = event.results[0][0].transcript.toLowerCase();
+        const raw = (event.results && event.results[0] && event.results[0][0] && event.results[0][0].transcript) ? event.results[0][0].transcript : '';
+        const command = raw.toLowerCase().trim();
         const token = command.split(' ').pop();
-        const target = doctors.find(d => d.name.toLowerCase().includes(token));
+
+        // First try to match patients (current doctor's patients)
+        const patientMatch = patients.find(p => (p.name||'').toLowerCase().includes(command) || (p.name||'').toLowerCase().includes(token));
+        if (patientMatch && (command.includes('open') || command.includes('view') || command.includes('patient') || command.includes('search') || command.includes(patientMatch.name.toLowerCase()))) {
+          // Open patient view in new tab
+          const url = `patient.html?user=${encodeURIComponent(patientMatch.name)}&role=patient&pid=${encodeURIComponent(patientMatch.id)}`;
+          window.open(url, '_blank');
+          return;
+        }
+
+        // Fallback: match doctors as before
+        const target = doctors.find(d => (d.name||'').toLowerCase().includes(command) || (d.name||'').toLowerCase().includes(token));
         if(command.includes("open") || command.includes("chat")){
           if(target) openChatWithDoctor(target); else alert("Doctor not found.");
         } else if(command.includes("call")){
           if(target){ openChatWithDoctor(target); startCall('video'); } else alert("Doctor not found.");
-        } else { alert("Try 'Open Dr. Rajesh' or 'Call Dr. Anita'."); }
+        } else { alert("Try 'Open Dr. Rajesh', 'Open patient John Doe' or 'Call Dr. Anita'."); }
       };
       recognition.start();
     }
@@ -617,9 +693,13 @@
         try { await upsertCurrentUserProfile(); } catch(e){ console.warn(e); }
         // finally subscribe to doctors collection
         subscribeDoctorsRealtime();
+        // subscribe to patients for this doctor so voice search can find current patients
+        try { subscribePatientsRealtime(currentUser.uid); } catch(e) { console.warn('subscribePatientsRealtime failed', e); }
       } else {
         // not signed in
         subscribeDoctorsRealtime();
+        // ensure patients unsubscribed
+        if (patientsListenerUnsub) { patientsListenerUnsub(); patientsListenerUnsub = null; patients = []; }
       }
     });
 
@@ -798,3 +878,4 @@
 
 </body>
 </html>
+
