@@ -88,9 +88,9 @@
                     <input type="text" id="search-input" placeholder="Search your RMP network..." 
                         class="w-full pl-10 pr-4 py-2.5 bg-slate-900/80 border border-slate-700 rounded-xl text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-medical-500 focus:border-medical-500 transition-all shadow-inner shadow-slate-950/60">
                 </div>
-                <button onclick="startVoiceCommand()" id="voice-cmd-btn" class="p-2.5 bg-slate-900/80 border border-slate-700 rounded-xl text-slate-400 hover:text-medical-400 hover:border-medical-500 transition-all relative" title="Voice Commands (e.g., 'Call RMP Dr. Arjun')">
-                    <i data-lucide="mic" class="w-5 h-5"></i>
-                    <span id="voice-listening" class="hidden absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full animate-ping"></span>
+                <button onclick="startVoiceSearch()" id="voice-search-btn" class="p-2.5 bg-slate-900/80 border border-slate-700 rounded-xl text-slate-400 hover:text-medical-400 hover:border-medical-500 transition-all relative group/mic" title="Voice Search (e.g., 'Dr. Arjun')">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-lucide="mic" class="lucide lucide-mic w-5 h-5"><path d="M12 19v3"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><rect x="9" y="2" width="6" height="13" rx="3"></rect></svg>
+                    <span id="voice-search-listening" class="hidden absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full animate-ping"></span>
                 </button>
             </div>
         </div>
@@ -540,6 +540,40 @@
       alert(`${type.toUpperCase()} call requested with ${activeRmp.name}. Implement WebRTC signaling on server to enable live calls.`);
     }
 
+    window.startVoiceSearch = function() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) { alert("Voice search not supported in your browser."); return; }
+      
+      const recognition = new SpeechRecognition();
+      const indicator = document.getElementById('voice-search-listening');
+      const searchInput = document.getElementById('search-input');
+      
+      recognition.onstart = () => { 
+        indicator.classList.remove('hidden'); 
+      };
+      
+      recognition.onend = () => { 
+        indicator.classList.add('hidden'); 
+      };
+      
+      recognition.onresult = (event) => {
+        const transcript = (event.results && event.results[0] && event.results[0][0] && event.results[0][0].transcript) ? event.results[0][0].transcript : '';
+        const searchTerm = transcript.toLowerCase().trim();
+        
+        if (searchInput) {
+          searchInput.value = searchTerm;
+          renderDoctors(searchTerm);
+        }
+      };
+      
+      recognition.onerror = (event) => {
+        console.error('Voice search error:', event.error);
+        alert('Voice search error: ' + event.error);
+      };
+      
+      recognition.start();
+    };
+
     function triggerFileUpload(){ document.getElementById('file-upload').click(); }
     function handleLogout(e){ if(e) e.preventDefault(); try{ window.location.href='login.html'; }catch(err){ alert('Logged out'); } }
     function openSupport(){ alert('Support: please configure support contact.'); }
@@ -558,3 +592,4 @@
     </script>
 </body>
 </html>
+
